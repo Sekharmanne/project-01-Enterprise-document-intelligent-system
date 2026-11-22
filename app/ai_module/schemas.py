@@ -21,7 +21,7 @@ class ChatResponse(BaseModel):
     answer: str
     sources: list[SourceHit]
     session_id: str | None
-    mode: Literal["google", "groq"]
+    mode: Literal["google", "groq", "openai"]
     answer_kind: Literal["document", "general"] = "document"
 
 

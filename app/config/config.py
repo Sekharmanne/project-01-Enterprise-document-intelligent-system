@@ -20,14 +20,17 @@ class Settings:
     storage_dir: Path | None = None
     dataset_dir: Path = Path(__file__).resolve().parents[2] / "documents"
     output_dir: Path = Path(__file__).resolve().parents[2] / "output"
-    llm_provider: str = "groq"
+    llm_provider: str = "openai"
+    chat_llm_provider: str | None = None
     embedding_provider: str = "huggingface"
     vector_backend: str = "chroma"
     google_api_key: str = ""
     groq_api_key: str = ""
+    openai_api_key: str = field(default="", repr=False)
     huggingface_token: str = field(default="", repr=False)
     google_chat_model: str = "gemini-3.5-flash"
     groq_chat_model: str = "qwen/qwen3.8-27b"
+    openai_chat_model: str = "gpt-4.1-mini"
     groq_fallback_models: tuple[str, ...] = ("openai/gpt-oss-120b", "openai/gpt-oss-20b")
     google_embedding_model: str = "models/gemini-embedding-001"
     huggingface_embedding_model: str = "BAAI/bge-small-en-v1.5"
@@ -50,6 +53,10 @@ class Settings:
     def storage_root(self) -> Path:
         return self.storage_dir if self.storage_dir is not None else self.output_dir / "storage"
 
+    @property
+    def chat_provider(self) -> str:
+        return self.chat_llm_provider or ("openai" if self.openai_api_key else self.llm_provider)
+
     @classmethod
     def from_env(cls) -> "Settings":
         storage_dir = os.getenv("STORAGE_DIR")
@@ -58,7 +65,7 @@ class Settings:
         huggingface_token = (
             os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN") or ""
         ).strip()
-        default_llm = "groq" if groq_api_key else "google" if google_api_key else cls.llm_provider
+        default_llm = cls.llm_provider
         # The fields above are the defaults. Deployments can override them.
         return cls(
             app_env=os.getenv("APP_ENV", cls.app_env).lower(),
@@ -70,13 +77,16 @@ class Settings:
             dataset_dir=Path(os.getenv("DATASET_DIR", str(cls.dataset_dir))).resolve(),
             output_dir=Path(os.getenv("OUTPUT_DIR", str(cls.output_dir))).resolve(),
             llm_provider=os.getenv("LLM_PROVIDER", default_llm).lower(),
+            chat_llm_provider=(os.getenv("CHAT_LLM_PROVIDER") or "").strip().lower() or None,
             embedding_provider=os.getenv("EMBEDDING_PROVIDER", cls.embedding_provider).lower(),
             vector_backend=os.getenv("VECTOR_BACKEND", cls.vector_backend).lower(),
             google_api_key=google_api_key,
             groq_api_key=groq_api_key,
+            openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
             huggingface_token=huggingface_token,
             google_chat_model=os.getenv("GOOGLE_CHAT_MODEL", cls.google_chat_model),
             groq_chat_model=os.getenv("GROQ_CHAT_MODEL", cls.groq_chat_model),
+            openai_chat_model=os.getenv("OPENAI_CHAT_MODEL", cls.openai_chat_model),
             google_embedding_model=os.getenv("GOOGLE_EMBEDDING_MODEL", cls.google_embedding_model),
             huggingface_embedding_model=os.getenv(
                 "HUGGINGFACE_EMBEDDING_MODEL", cls.huggingface_embedding_model
@@ -114,17 +124,21 @@ class Settings:
             raise ValueError("Production requires AUTH_MODE=jwt")
         if self.auth_mode == "jwt" and len(self.jwt_secret) < 32:
             raise ValueError("JWT_SECRET must be at least 32 characters in jwt mode")
-        if self.llm_provider not in ("google", "groq"):
-            raise ValueError("LLM_PROVIDER must be google or groq")
+        if self.llm_provider not in ("google", "groq", "openai"):
+            raise ValueError("LLM_PROVIDER must be google, groq or openai")
+        if self.chat_provider not in ("google", "groq", "openai"):
+            raise ValueError("CHAT_LLM_PROVIDER must be google, groq or openai")
         if self.embedding_provider not in ("google", "huggingface"):
             raise ValueError("EMBEDDING_PROVIDER must be google or huggingface")
         if self.vector_backend != "chroma":
             raise ValueError("VECTOR_BACKEND must be chroma")
-        if self.llm_provider == "google" or self.embedding_provider == "google":
+        if "google" in (self.llm_provider, self.chat_provider, self.embedding_provider):
             if not self.google_api_key:
                 raise ValueError("GOOGLE_API_KEY required for google models")
-        if self.llm_provider == "groq" and not self.groq_api_key:
+        if "groq" in (self.llm_provider, self.chat_provider) and not self.groq_api_key:
             raise ValueError("GROQ_API_KEY required for Groq model")
+        if "openai" in (self.llm_provider, self.chat_provider) and not self.openai_api_key:
+            raise ValueError("OPENAI_API_KEY required for OpenAI models")
         if self.embedding_provider == "huggingface" and not self.huggingface_token:
             raise ValueError("HF_TOKEN or HUGGINGFACEHUB_API_TOKEN required for Hugging Face inference")
         limits = (

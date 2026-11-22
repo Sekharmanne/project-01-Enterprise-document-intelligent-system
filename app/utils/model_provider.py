@@ -8,14 +8,24 @@ from app.config.config import Settings
 class ModelProvider:
     """Build and cache the selected provider model only when it is needed."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, provider: str | None = None):
         self.settings = settings
+        self.provider = provider or settings.llm_provider
         self._model = None
 
     @property
     def model(self):
         if self._model is None:
-            if self.settings.llm_provider == "google":
+            if self.provider == "openai":
+                from langchain_openai import ChatOpenAI
+
+                self._model = ChatOpenAI(
+                    model=self.settings.openai_chat_model,
+                    api_key=self.settings.openai_api_key,
+                    timeout=30,
+                    max_retries=0,
+                )
+            elif self.provider == "google":
                 from langchain_google_genai import ChatGoogleGenerativeAI
 
                 self._model = ChatGoogleGenerativeAI(
@@ -23,7 +33,7 @@ class ModelProvider:
                     google_api_key=self.settings.google_api_key,
                     temperature=0,
                 )
-            elif self.settings.llm_provider == "groq":
+            elif self.provider == "groq":
                 from groq import RateLimitError
                 from langchain_groq import ChatGroq
 

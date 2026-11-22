@@ -22,7 +22,10 @@ class PortalService:
         self.embedder = make_embedder(settings)
         self.index = IndexService(self.warehouse, self.embedder, settings)
         self.models = ModelProvider(settings)
-        self.document_chat = DocumentChatService(settings, self.models)
+        chat_models = self.models
+        if settings.chat_provider != settings.llm_provider:
+            chat_models = ModelProvider(settings, provider=settings.chat_provider)
+        self.document_chat = DocumentChatService(settings, chat_models)
         self.document_ingestion = DocumentIngestionService(settings)
         self.document_analysis = DocumentAnalysisService(settings, self.models)
         self.document_compare = DocumentCompareService(settings, self.document_analysis)
@@ -96,7 +99,7 @@ class PortalService:
             raise HTTPException(409, "Use Load Dataset or Upload Documents before asking about files.")
         return ChatResponse(
             answer=self.document_chat.answer_directly(data.question),
-            sources=[], session_id=None, mode=self.settings.llm_provider, answer_kind="general",
+            sources=[], session_id=None, mode=self.settings.chat_provider, answer_kind="general",
         )
 
     def chat(self, sid: str, user: str, data: AskRequest) -> ChatResponse:
@@ -119,7 +122,7 @@ class PortalService:
                     sources=[SourceHit(document=hit["document"], page=hit["page"],
                                        score=hit["score"], excerpt=hit["text"][:350]) for hit in hits],
                     session_id=sid,
-                    mode=self.settings.llm_provider,
+                    mode=self.settings.chat_provider,
                 )
             turns = [
                 {"role": "user", "content": data.question, "answer_kind": result.answer_kind},

@@ -13,6 +13,10 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from groq import APIConnectionError, APITimeoutError, RateLimitError
 from langchain_core.exceptions import OutputParserException
+from openai import APIConnectionError as OpenAIConnectionError
+from openai import APITimeoutError as OpenAITimeoutError
+from openai import AuthenticationError as OpenAIAuthenticationError
+from openai import RateLimitError as OpenAIRateLimitError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from structlog import get_logger
 from structlog.contextvars import bind_contextvars, reset_contextvars
@@ -39,7 +43,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             run_logger = logger_factory.get_logger()
             run_logger.info(
                 "app_started",
-                chat_provider=conf.llm_provider,
+                chat_provider=conf.chat_provider,
+                analysis_provider=conf.llm_provider,
                 embedding_provider=conf.embedding_provider,
                 vector_backend=conf.vector_backend,
             )
@@ -93,24 +98,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await http_exception_handler(request, exc)
 
     @app.exception_handler(RateLimitError)
-    async def handle_groq_rate_limit(request: Request, exc: RateLimitError):
+    @app.exception_handler(OpenAIRateLimitError)
+    async def handle_model_rate_limit(request: Request, exc: RateLimitError | OpenAIRateLimitError):
+        provider = "OpenAI" if isinstance(exc, OpenAIRateLimitError) else "Groq"
         retry_after = exc.response.headers.get("retry-after", "").strip()
         headers = {}
-        detail = "Groq rate limit reached. Please try again later."
-        if retry_after.isascii() and retry_after.isdecimal():
+        detail = f"{provider} rate limit reached. Please try again later."
+        if isinstance(exc, OpenAIRateLimitError) and exc.code == "insufficient_quota":
+            detail = "OpenAI API quota is exhausted. Check your API usage or billing."
+        elif retry_after.isascii() and retry_after.isdecimal():
             headers["Retry-After"] = retry_after
-            detail = f"Groq rate limit reached. Try again in about {retry_after} seconds."
-        logger.warning("groq_rate_limit", retry_after=headers.get("Retry-After"))
+            detail = f"{provider} rate limit reached. Try again in about {retry_after} seconds."
+        logger.warning(f"{provider.lower()}_rate_limit", retry_after=headers.get("Retry-After"))
         return JSONResponse(status_code=429, content={"detail": detail}, headers=headers)
 
     @app.exception_handler(APIConnectionError)
-    async def handle_groq_connection_error(request: Request, exc: APIConnectionError):
-        timed_out = isinstance(exc, APITimeoutError)
+    @app.exception_handler(OpenAIConnectionError)
+    async def handle_model_connection_error(request: Request, exc: APIConnectionError | OpenAIConnectionError):
+        provider = "OpenAI" if isinstance(exc, OpenAIConnectionError) else "Groq"
+        timed_out = isinstance(exc, (APITimeoutError, OpenAITimeoutError))
         status_code = 504 if timed_out else 502
-        detail = "Groq did not respond in time." if timed_out else "EDIS could not reach Groq."
-        logger.warning("groq_connection_error", error_type=type(exc).__name__, status_code=status_code)
+        detail = f"{provider} did not respond in time." if timed_out else f"EDIS could not reach {provider}."
+        logger.warning(f"{provider.lower()}_connection_error", error_type=type(exc).__name__, status_code=status_code)
         return JSONResponse(
             status_code=status_code, content={"detail": f"{detail} Please try again."},
+        )
+
+    @app.exception_handler(OpenAIAuthenticationError)
+    async def handle_openai_auth_error(request: Request, exc: OpenAIAuthenticationError):
+        logger.warning("openai_authentication_failed", status_code=502)
+        return JSONResponse(
+            status_code=502,
+            content={"detail": "OpenAI rejected the API credentials. Check OPENAI_API_KEY in the server configuration."},
         )
 
     @app.exception_handler(OutputParserException)
