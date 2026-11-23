@@ -22,14 +22,15 @@ logger = get_logger(LOGGER_NAME)
 
 
 @contextmanager
-def track_operation(operation: str):
+def track_operation(operation: str, label: str, **details):
     started = perf_counter()
-    logger.info("operation_started", operation=operation)
+    logger.info("operation_started", message=f"{label} started.", operation=operation, **details)
     try:
         yield
     except Exception as error:
         logger.warning(
             "operation_failed",
+            message=f"{label} stopped before it could finish. Look for the error with the same request ID.",
             operation=operation,
             duration_ms=round((perf_counter() - started) * 1000, 1),
             status_code=getattr(error, "status_code", None),
@@ -39,6 +40,7 @@ def track_operation(operation: str):
     else:
         logger.info(
             "operation_completed",
+            message=f"{label} finished successfully.",
             operation=operation,
             duration_ms=round((perf_counter() - started) * 1000, 1),
         )
@@ -100,7 +102,7 @@ async def upload_documents(
     portal.warehouse.owned(session_id, user)  # Authorization before processing uploaded bytes.
     if not files or len(files) > settings.max_files_per_request:
         raise HTTPException(status_code=400, detail=f"Upload 1–{settings.max_files_per_request} files")
-    with track_operation("upload_documents"):
+    with track_operation("upload_documents", "Document upload", file_count=len(files)):
         documents = [await read_upload(file, settings) for file in files]
         result = await run_in_threadpool(portal.ingest, session_id, user, documents)
     return dict(result, session_id=session_id)
@@ -111,19 +113,19 @@ async def load_dataset(session_id: str, user: User, portal: Portal) -> dict:
     """Index files from the server's configured dataset directory."""
     session_id = require_session_id(session_id)
     portal.warehouse.owned(session_id, user)
-    with track_operation("load_dataset"):
+    with track_operation("load_dataset", "Server dataset indexing"):
         result = await run_in_threadpool(portal.ingest_dataset, session_id, user)
     return dict(result, session_id=session_id)
 
 
 @router.post("/sessions/{session_id}/chat", response_model=ChatResponse)
 def chat(session_id: str, data: AskRequest, user: User, portal: Portal) -> ChatResponse:
-    with track_operation("document_chat"):
+    with track_operation("document_chat", "Document chat"):
         return portal.chat(require_session_id(session_id), user, data)
 
 @router.post("/chat", response_model=ChatResponse)
 def direct_chat(data: AskRequest, user: User, portal: Portal) -> ChatResponse:
-    with track_operation("document_chat"):
+    with track_operation("document_chat", "General chat"):
         return portal.direct_chat(data)
 
 
@@ -138,7 +140,7 @@ async def analyze(
         max_pages=settings.max_analysis_pages,
         max_extracted_chars=settings.max_analysis_extracted_chars,
     )
-    with track_operation("document_analysis"):
+    with track_operation("document_analysis", "Document analysis"):
         doc = await read_upload(file, analysis_settings)
         return await run_in_threadpool(portal.analyze, doc)
 
@@ -148,7 +150,7 @@ async def compare(
     reference: UploadFile, actual: UploadFile, user: User, portal: Portal, settings: Conf
 ) -> CompareResponse:
     _ = user
-    with track_operation("document_compare"):
+    with track_operation("document_compare", "Document comparison"):
         ref = await read_upload(reference, settings)
         updated = await read_upload(actual, settings)
         return await run_in_threadpool(portal.compare, ref, updated)

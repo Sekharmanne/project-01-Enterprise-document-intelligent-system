@@ -1,11 +1,14 @@
 """Application orchestration, avoiding stateful LLM chains stored in global variables."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import HTTPException
 
 from app.config.config import Settings
 from app.ai_module.schemas import AskRequest, ChatResponse, SourceHit
 from app.ai_module.document_chat import DocumentChatService
+from app.ai_module.document_chat_graph import build_document_chat_graph
 from app.ai_module.document_compare import DocumentCompareService
 from app.ai_module.document_analysis import DocumentAnalysisService
 from app.ai_module.document_ingestion import DocumentIngestionService, ParsedDocument
@@ -26,6 +29,7 @@ class PortalService:
         if settings.chat_provider != settings.llm_provider:
             chat_models = ModelProvider(settings, provider=settings.chat_provider)
         self.document_chat = DocumentChatService(settings, chat_models)
+        self.document_chat_graph = build_document_chat_graph(self.document_chat, self.index)
         self.document_ingestion = DocumentIngestionService(settings)
         self.document_analysis = DocumentAnalysisService(settings, self.models)
         self.document_compare = DocumentCompareService(settings, self.document_analysis)
@@ -35,8 +39,22 @@ class PortalService:
 
     def session_detail(self, sid: str, user: str) -> dict:
         manifest = self.warehouse.owned(sid, user)
-        history = self.warehouse.read_json(self.warehouse.path(sid) / "history.json")
+        history = self._read_chat_history(self.warehouse.path(sid) / "history.json")
         return dict(self.warehouse.public_manifest(manifest), history=history)
+
+    def _read_chat_history(self, path: Path) -> list[dict]:
+        history = self.warehouse.read_json(path)
+        for index, turn in enumerate(history):
+            if turn.get("role") != "user" or turn.get("answer_kind") == "general":
+                continue
+            if not self.document_chat.is_small_talk(turn.get("content", "")):
+                continue
+            turn["answer_kind"] = "general"
+            if index + 1 < len(history):
+                reply = history[index + 1]
+                if reply.get("role") == "assistant" and reply.get("conversation_id") == turn.get("conversation_id"):
+                    reply.update(answer_kind="general", sources=[])
+        return history
 
     def ingest(self, sid: str, user: str, documents: list[ParsedDocument]) -> dict:
         return self.index.add(sid, user, documents)
@@ -106,7 +124,7 @@ class PortalService:
         with self.warehouse.lock:
             self.warehouse.owned(sid, user)
             path = self.warehouse.path(sid) / "history.json"
-            history = self.warehouse.read_json(path)
+            history = self._read_chat_history(path)
             if self.document_chat.is_small_talk(data.question):
                 result = self.direct_chat(data).model_copy(update={"session_id": sid})
             else:
@@ -115,12 +133,22 @@ class PortalService:
                     if turn.get("conversation_id") == data.conversation_id
                     and turn.get("answer_kind") != "general"
                 ]
-                standalone = self.document_chat.rewrite_query(data.question, document_history)
-                hits = self.index.search(sid, user, standalone, k=data.top_k)
+                state = self.document_chat_graph.invoke({
+                    "session_id": sid,
+                    "user": user,
+                    "question": data.question,
+                    "history": document_history,
+                    "top_k": data.top_k,
+                })
                 result = ChatResponse(
-                    answer=self.document_chat.answer(data.question, hits, document_history),
-                    sources=[SourceHit(document=hit["document"], page=hit["page"],
-                                       score=hit["score"], excerpt=hit["text"][:350]) for hit in hits],
+                    answer=state["answer"],
+                    sources=[
+                        SourceHit(
+                            document=hit["document"], page=hit["page"],
+                            score=hit["score"], excerpt=hit["text"][:350],
+                        )
+                        for hit in state["hits"]
+                    ],
                     session_id=sid,
                     mode=self.settings.chat_provider,
                 )

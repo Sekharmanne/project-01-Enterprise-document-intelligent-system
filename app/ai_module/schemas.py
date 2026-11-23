@@ -38,6 +38,8 @@ class ChangeItem(BaseModel):
     page: int
     changed: bool
     summary: str
+    reference_page: int | None = None
+    actual_page: int | None = None
 
 
 class ComparisonOverview(BaseModel):

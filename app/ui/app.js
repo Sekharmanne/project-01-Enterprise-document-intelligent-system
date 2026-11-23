@@ -357,8 +357,20 @@ function renderComparison(result, referenceName, actualName) {
   ]));
   for (const item of changed) {
     const section = resultNode('section', 'result-section');
+    let heading = 'Key differences';
+    if (byPage) {
+      const { reference_page: reference, actual_page: actual } = item;
+      heading = `Page ${item.page}`;
+      if (reference != null && actual != null && reference !== actual) {
+        heading = `Reference page ${reference} → second document page ${actual}`;
+      } else if (reference == null && actual != null) {
+        heading = `Second document page ${actual} added`;
+      } else if (reference != null && actual == null) {
+        heading = `Reference page ${reference} removed`;
+      }
+    }
     section.append(
-      resultNode('h4', null, byPage ? `Page ${item.page}` : 'Key differences'),
+      resultNode('h4', null, heading),
       resultNode('p', 'result-text', item.summary)
     );
     children.push(section);

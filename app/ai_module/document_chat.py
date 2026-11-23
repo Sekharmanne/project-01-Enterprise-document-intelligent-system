@@ -9,15 +9,21 @@ from app.utils.model_provider import ModelProvider
 from app.config.config import Settings
 from app.ai_module.prompt_manager import PromptManager
 
+GREETING = r"(?:hi+|hello+|hey+|hiya|yo|good (?:morning|afternoon|evening|night)|namaste|namaskar)"
+ADDRESS = r"(?:bro|brother|bhai|bhaiya|dost|yaar|buddy|mate|sir|ma'am|edis|there)"
+SMALL_TALK_SEPARATOR = r"[.!?, ]+"
 SMALL_TALK = re.compile(
-    r"(?:(?:hi|hello|hey|good morning|good afternoon|good evening|namaste)[.!?, ]+)?"
-    r"(?:hi|hello|hey|good morning|good afternoon|good evening|namaste|"
-    r"how are you(?: doing)?(?: today)?|how are u|how is it going|how's it going|what's up|"
-    r"what are you doing(?: right now)?|what you are doing|who are you|what are you|"
+    rf"(?:{ADDRESS}{SMALL_TALK_SEPARATOR})?"
+    rf"(?:{GREETING}(?:{SMALL_TALK_SEPARATOR}{ADDRESS})?{SMALL_TALK_SEPARATOR})*"
+    rf"(?:{GREETING}|"
+    r"how (?:are|r) (?:you|u)(?: doing)?(?: today)?|how(?: is|'s) it going|"
+    r"how(?: is|'s) your day(?: going)?|what(?: is|'s) up|whats up|"
+    r"what are you doing(?: right now)?|what you are doing|who are you|what are you|what is your name|"
     r"what(?: can| do) you do|what can you help (?:me |us )?with|"
     r"can you help me|tell me about yourself|what is edis|"
-    r"how does edis work|kaise ho|kya kar rahe ho|"
+    r"how does edis work|(?:aap )?kaise (?:ho|hain)|kya haal hai|kya kar rahe ho|"
     r"thank you(?: so much)?|thanks(?: a lot)?|bye|goodbye)"
+    rf"(?:{SMALL_TALK_SEPARATOR}{ADDRESS})?"
 )
 
 
@@ -28,7 +34,7 @@ class DocumentChatService:
 
     @staticmethod
     def is_small_talk(question: str) -> bool:
-        normalized = " ".join(question.casefold().replace("’", "'").split()).strip(" .!?,")
+        normalized = " ".join(question.casefold().replace("\u2019", "'").split()).strip(" .!?,")
         return SMALL_TALK.fullmatch(normalized) is not None
 
     def answer_directly(self, question: str) -> str:
