@@ -10,7 +10,7 @@ from app.config.config import Settings
 from app.ai_module.prompt_manager import PromptManager
 
 GREETING = r"(?:hi+|hello+|hey+|hiya|yo|good (?:morning|afternoon|evening|night)|namaste|namaskar)"
-ADDRESS = r"(?:bro|brother|bhai|bhaiya|dost|yaar|buddy|mate|sir|ma'am|edis|there)"
+ADDRESS = r"(?:bro|brother|sis|sister|bhai|bhaiya|dost|yaar|buddy|mate|sir|ma'am|edis|there)"
 SMALL_TALK_SEPARATOR = r"[.!?, ]+"
 SMALL_TALK = re.compile(
     rf"(?:{ADDRESS}{SMALL_TALK_SEPARATOR})?"
@@ -36,6 +36,39 @@ class DocumentChatService:
     def is_small_talk(question: str) -> bool:
         normalized = " ".join(question.casefold().replace("\u2019", "'").split()).strip(" .!?,")
         return SMALL_TALK.fullmatch(normalized) is not None
+
+    @staticmethod
+    def is_unsupported_answer(answer: str) -> bool:
+        normalized = answer.strip().casefold().replace("\u2019", "'").rstrip(".")
+        return normalized in {
+            "i don't know based on the documents",
+            "i don't know based on the uploaded documents",
+        }
+
+    def general_reply(self, question: str, history: list[dict], documents: list[str]) -> str | None:
+        if self.is_small_talk(question):
+            return self.answer_directly(question)
+
+        from langchain_core.exceptions import OutputParserException
+        from langchain_core.output_parsers import JsonOutputParser
+
+        recent = "\n".join(
+            f"{turn['role']}: {turn['content'][:1_000]}"
+            for turn in history[-6:]
+        )
+        chain = PromptManager.route_chat() | self.models.model | JsonOutputParser()
+        result = chain.invoke({
+            "question": question,
+            "history": recent,
+            "documents": "\n".join(documents),
+        })
+        if isinstance(result, dict):
+            if result.get("intent") == "document":
+                return None
+            answer = result.get("answer")
+            if result.get("intent") == "general" and isinstance(answer, str) and answer.strip():
+                return answer.strip()
+        raise OutputParserException("The model did not return a valid chat route.")
 
     def answer_directly(self, question: str) -> str:
         from langchain_core.output_parsers import StrOutputParser

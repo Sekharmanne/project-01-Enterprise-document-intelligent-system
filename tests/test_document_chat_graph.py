@@ -1,3 +1,4 @@
+import json
 from unittest.mock import call, patch
 
 import pytest
@@ -12,6 +13,7 @@ from app.services.document_workflows import PortalService
 @pytest.fixture
 def session(tmp_path):
     portal = PortalService(Settings(storage_dir=tmp_path))
+    portal.document_chat.models._model = RunnableLambda(lambda _: '{"intent":"document","answer":null}')
     session_id = portal.create_session("owner")["session_id"]
     return portal, session_id
 
@@ -76,11 +78,14 @@ def test_missing_documents_error_leaves_history_empty(session):
 
 def test_combined_greeting_calls_model_without_document_search(session):
     portal, session_id = session
-    questions = ["hello bro", "hi hello how are you", "Hey bro, how are you?", "Bhai, kya haal hai?"]
+    questions = ["hello bro", "hello sister", "hi hello how are you", "Hey bro, how are you?", "Bhai, kya haal hai?"]
     received = []
 
     def reply(prompt):
-        received.append(prompt.to_messages()[-1].content)
+        system, human = (message.content for message in prompt.to_messages())
+        if "Decide whether" in system:
+            return '{"intent":"document","answer":null}'
+        received.append(human)
         return "Hi! I'm doing well."
 
     portal.document_chat.models._model = RunnableLambda(reply)
@@ -124,3 +129,48 @@ def test_saved_greeting_loses_old_sources_without_affecting_document_answers(ses
     ):
         portal.chat(session_id, "owner", AskRequest(question=followup))
     rewrite.assert_called_once_with(followup, document_turns)
+
+
+def test_intent_router_handles_casual_followups_typos_and_weather_without_rag(session):
+    portal, session_id = session
+    replies = {
+        "i am doing good what about you bro": "I'm doing well too!",
+        "hgello brother": "Hey! How's it going?",
+        "hello bro what is tday weather": "I can't check live weather here.",
+    }
+    routed_messages = []
+
+    def model_response(prompt):
+        system, human = (message.content for message in prompt.to_messages())
+        if "Decide whether" not in system:
+            return "I'm doing well, thanks! How are you?"
+        assert "do not guess" in system
+        routed_messages.append(human)
+        question = human.split("Latest message:\n")[-1]
+        return json.dumps({"intent": "general", "answer": replies[question]})
+
+    portal.document_chat.models._model = RunnableLambda(model_response)
+    with patch.object(portal.document_chat_graph, "invoke") as rag:
+        portal.chat(session_id, "owner", AskRequest(question="how are you bro"))
+        for question, expected in replies.items():
+            result = portal.chat(session_id, "owner", AskRequest(question=question))
+            assert result.answer == expected
+            assert result.answer_kind == "general" and result.sources == []
+        assert portal.direct_chat(AskRequest(question="hgello brother")).answer == replies["hgello brother"]
+        rag.assert_not_called()
+
+    assert "assistant: I'm doing well, thanks! How are you?" in routed_messages[0]
+
+
+def test_unsupported_document_answer_omits_retrieved_sources(session):
+    portal, session_id = session
+    hits = [{"document": "report.pdf", "page": 1, "text": "Unrelated excerpt", "score": 0.9}]
+    with (
+        patch.object(portal.index, "search_locked", return_value=hits) as search,
+        patch.object(portal.document_chat, "answer", return_value="I don't know based on the documents."),
+    ):
+        response = portal.chat(session_id, "owner", AskRequest(question="What is the policy's renewal date?"))
+    search.assert_called_once()
+    assert response.answer_kind == "document"
+    assert response.sources == []
+    assert portal.session_detail(session_id, "owner")["history"][-1]["sources"] == []

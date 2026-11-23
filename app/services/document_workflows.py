@@ -45,6 +45,8 @@ class PortalService:
     def _read_chat_history(self, path: Path) -> list[dict]:
         history = self.warehouse.read_json(path)
         for index, turn in enumerate(history):
+            if turn.get("role") == "assistant" and self.document_chat.is_unsupported_answer(turn.get("content", "")):
+                turn["sources"] = []
             if turn.get("role") != "user" or turn.get("answer_kind") == "general":
                 continue
             if not self.document_chat.is_small_talk(turn.get("content", "")):
@@ -113,26 +115,29 @@ class PortalService:
         return None
 
     def direct_chat(self, data: AskRequest) -> ChatResponse:
-        if not self.document_chat.is_small_talk(data.question):
+        answer = self.document_chat.general_reply(data.question, history=[], documents=[])
+        if answer is None:
             raise HTTPException(409, "Use Load Dataset or Upload Documents before asking about files.")
+        return self._general_chat_response(answer)
+
+    def _general_chat_response(self, answer: str, sid: str | None = None) -> ChatResponse:
         return ChatResponse(
-            answer=self.document_chat.answer_directly(data.question),
-            sources=[], session_id=None, mode=self.settings.chat_provider, answer_kind="general",
+            answer=answer, sources=[], session_id=sid, mode=self.settings.chat_provider, answer_kind="general",
         )
 
     def chat(self, sid: str, user: str, data: AskRequest) -> ChatResponse:
         with self.warehouse.lock:
-            self.warehouse.owned(sid, user)
+            manifest = self.warehouse.owned(sid, user)
             path = self.warehouse.path(sid) / "history.json"
             history = self._read_chat_history(path)
-            if self.document_chat.is_small_talk(data.question):
-                result = self.direct_chat(data).model_copy(update={"session_id": sid})
+            conversation = [turn for turn in history if turn.get("conversation_id") == data.conversation_id]
+            answer = self.document_chat.general_reply(
+                data.question, conversation, [doc["name"] for doc in manifest["documents"]],
+            )
+            if answer is not None:
+                result = self._general_chat_response(answer, sid)
             else:
-                document_history = [
-                    turn for turn in history
-                    if turn.get("conversation_id") == data.conversation_id
-                    and turn.get("answer_kind") != "general"
-                ]
+                document_history = [turn for turn in conversation if turn.get("answer_kind") != "general"]
                 state = self.document_chat_graph.invoke({
                     "session_id": sid,
                     "user": user,
@@ -140,14 +145,16 @@ class PortalService:
                     "history": document_history,
                     "top_k": data.top_k,
                 })
+                answer = state["answer"]
+                hits = [] if self.document_chat.is_unsupported_answer(answer) else state["hits"]
                 result = ChatResponse(
-                    answer=state["answer"],
+                    answer=answer,
                     sources=[
                         SourceHit(
                             document=hit["document"], page=hit["page"],
                             score=hit["score"], excerpt=hit["text"][:350],
                         )
-                        for hit in state["hits"]
+                        for hit in hits
                     ],
                     session_id=sid,
                     mode=self.settings.chat_provider,
