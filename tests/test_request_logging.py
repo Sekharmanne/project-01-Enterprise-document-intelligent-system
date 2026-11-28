@@ -22,10 +22,10 @@ def test_console_progress_and_structured_failure_details(tmp_path, monkeypatch, 
     app = main.create_app(settings)
     sensitive_value = "private provider payload"
 
-    def fail_with_internal_error(_document):
+    def fail_with_internal_error(_document, _custom_instructions):
         raise RuntimeError(sensitive_value)
 
-    def fail_with_quota_error(_document):
+    def fail_with_quota_error(_document, _custom_instructions):
         response = httpx.Response(
             429, request=httpx.Request("POST", "https://example.test/"),
         )

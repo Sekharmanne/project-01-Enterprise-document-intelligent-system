@@ -59,8 +59,18 @@ class CompareResponse(BaseModel):
     actual_sections: list[str] = Field(default_factory=list)
 
 
-ReviewWorkflow = Literal["analysis", "compare"]
+DocumentWorkflow = Literal["analysis", "compare"]
 ReviewStatus = Literal["approved", "changes_requested"]
+MAX_CUSTOM_INSTRUCTIONS = 1200
+
+
+class InstructionPreference(BaseModel):
+    instructions: Annotated[str, StringConstraints(max_length=MAX_CUSTOM_INSTRUCTIONS, strip_whitespace=True)]
+
+
+class InstructionDefaults(BaseModel):
+    analysis: str = ""
+    compare: str = ""
 
 
 class ReviewDecision(BaseModel):
@@ -76,7 +86,7 @@ class ReviewDecision(BaseModel):
 
 class ResultReview(BaseModel):
     review_id: str
-    workflow: ReviewWorkflow
+    workflow: DocumentWorkflow
     status: ReviewStatus | Literal["pending"] = "pending"
     note: str = ""
     created_at: str

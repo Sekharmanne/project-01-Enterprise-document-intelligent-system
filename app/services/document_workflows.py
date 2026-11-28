@@ -198,8 +198,8 @@ class PortalService:
             self._save_chat_turns(path, history, data, result)
         return result
 
-    def analyze(self, doc: ParsedDocument):
-        return self.document_analysis.analyze(doc)
+    def analyze(self, doc: ParsedDocument, custom_instructions: str = ""):
+        return self.document_analysis.analyze(doc, custom_instructions)
 
-    def compare(self, ref: ParsedDocument, updated: ParsedDocument):
-        return self.document_compare.compare(ref, updated)
+    def compare(self, ref: ParsedDocument, updated: ParsedDocument, custom_instructions: str = ""):
+        return self.document_compare.compare(ref, updated, custom_instructions)

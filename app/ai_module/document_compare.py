@@ -29,11 +29,13 @@ class PageComparison(TypedDict):
     index: int
     reference: Page | None
     actual: Page | None
+    custom_instructions: str
 
 
 class ComparisonState(TypedDict):
     reference: ParsedDocument
     actual: ParsedDocument
+    custom_instructions: str
     page_pairs: list[tuple[Page | None, Page | None]]
     changes: Annotated[list[tuple[int, ChangeItem]], operator.add]
     reference_text: str
@@ -50,10 +52,10 @@ class DocumentCompareService:
         self.graph = self._build_graph()
 
     def compare(
-        self, reference: ParsedDocument, actual: ParsedDocument
+        self, reference: ParsedDocument, actual: ParsedDocument, custom_instructions: str = ""
     ) -> CompareResponse:
         state = self.graph.invoke(
-            {"reference": reference, "actual": actual},
+            {"reference": reference, "actual": actual, "custom_instructions": custom_instructions},
             config={"max_concurrency": DOCUMENT_WORKFLOW_CONCURRENCY},
         )
         return state["response"]
@@ -111,7 +113,10 @@ class DocumentCompareService:
     @staticmethod
     def _dispatch_pages(state: ComparisonState) -> list[Send] | Literal["collect_pages"]:
         return [
-            Send("compare_page", {"index": index, "reference": reference, "actual": actual})
+            Send("compare_page", {
+                "index": index, "reference": reference, "actual": actual,
+                "custom_instructions": state["custom_instructions"],
+            })
             for index, (reference, actual) in enumerate(state["page_pairs"])
         ] or "collect_pages"
 
@@ -122,7 +127,7 @@ class DocumentCompareService:
         actual_page = actual.number if actual else None
         left = reference.text if reference else ""
         right = actual.text if actual else ""
-        change = self._compare_text(left, right, actual_page or reference_page)
+        change = self._compare_text(left, right, actual_page or reference_page, pair["custom_instructions"])
         change.reference_page = reference_page
         change.actual_page = actual_page
         if reference is None or actual is None:
@@ -168,22 +173,22 @@ class DocumentCompareService:
     def _compare_document(self, state: ComparisonState) -> dict:
         logger.info("document_compare_direct", message="Comparing the two documents as a whole.")
         return {"response": CompareResponse(
-            changes=[self._compare_text(state["reference_text"], state["actual_text"], 1)],
+            changes=[self._compare_text(state["reference_text"], state["actual_text"], 1, state["custom_instructions"])],
             reference_pages=len(state["reference"].pages),
             actual_pages=len(state["actual"].pages),
             mode=self.settings.llm_provider,
             comparison_kind="document",
         )}
 
-    def _compare_text(self, left: str, right: str, page: int) -> ChangeItem:
+    def _compare_text(self, left: str, right: str, page: int, custom_instructions: str) -> ChangeItem:
         if left == right:
             return ChangeItem(page=page, changed=False, summary="NO CHANGE")
         model = self.analysis.analysis_model()
         if len(left) > 6_000:
-            _, left = self.analysis.comparison_sections(left, model, "reference")
+            _, left = self.analysis.comparison_sections(left, model, "reference", custom_instructions)
         if len(right) > 6_000:
-            _, right = self.analysis.comparison_sections(right, model, "second")
-        chain = PromptManager.document_compare() | model | StrOutputParser()
+            _, right = self.analysis.comparison_sections(right, model, "second", custom_instructions)
+        chain = PromptManager.document_compare(custom_instructions) | model | StrOutputParser()
         summary = self.analysis.invoke_model(chain, {"left": left, "right": right}).strip()
         if not summary:
             raise OutputParserException("The comparison output was empty.")
@@ -191,12 +196,12 @@ class DocumentCompareService:
 
     def _summarize_reference(self, state: ComparisonState) -> dict:
         return {"reference_summary": self.analysis.comparison_sections(
-            state["reference_text"], self.analysis.analysis_model(), "reference"
+            state["reference_text"], self.analysis.analysis_model(), "reference", state["custom_instructions"],
         )}
 
     def _summarize_actual(self, state: ComparisonState) -> dict:
         return {"actual_summary": self.analysis.comparison_sections(
-            state["actual_text"], self.analysis.analysis_model(), "second"
+            state["actual_text"], self.analysis.analysis_model(), "second", state["custom_instructions"],
         )}
 
     def _compare_sections(self, state: ComparisonState) -> dict:
@@ -204,7 +209,7 @@ class DocumentCompareService:
         right_sections, right_summary = state["actual_summary"]
         model = self.analysis.analysis_model()
         chain = (
-            PromptManager.compare_document_sections(ComparisonOverview)
+            PromptManager.compare_document_sections(ComparisonOverview, state["custom_instructions"])
             | model
             | PydanticOutputParser(pydantic_object=ComparisonOverview)
         )

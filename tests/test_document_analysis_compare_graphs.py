@@ -33,6 +33,67 @@ def pdf_upload(name, pages):
         return name, document.tobytes(), "application/pdf"
 
 
+@pytest.mark.parametrize("workflow", ["analysis", "compare_text", "compare_pdf"])
+def test_custom_instructions_reach_model_and_have_separate_cache_entries(document_api, monkeypatch, workflow):
+    client, analysis = document_api
+    seen = []
+
+    def respond(prompt):
+        system, preferences, document_text = (message.content for message in prompt.to_messages())
+        assert "only when compatible" in system
+        assert preferences.startswith("User preferences for this request:\n")
+        assert "Source fee" in document_text
+        seen.append(preferences.split("\n", 1)[1])
+        if workflow == "analysis":
+            return json.dumps({"title": "Report", "summary": seen[-1], "keywords": [], "language": "en"})
+        return seen[-1]
+
+    monkeypatch.setattr(analysis, "analysis_model", lambda: RunnableLambda(respond))
+    if workflow == "analysis":
+        url = "/api/analyze"
+        files = {"file": ("report.txt", "Source fee is 10.", "text/plain")}
+    else:
+        url = "/api/compare"
+        if workflow == "compare_pdf":
+            files = {
+                "reference": pdf_upload("old.pdf", ["Source fee is 10."]),
+                "actual": pdf_upload("new.pdf", ["Source fee is 20."]),
+            }
+        else:
+            files = {"reference": ("old.txt", "Source fee is 10."), "actual": ("new.txt", "Source fee is 20.")}
+
+    instructions = "Summarize fees using {amount} as a label."
+    first = client.post(url, data={"custom_instructions": instructions}, files=files)
+    cached = client.post(url, data={"custom_instructions": f"  {instructions}  "}, files=files)
+    updated = client.post(url, data={"custom_instructions": "Focus on dates."}, files=files)
+    assert [response.status_code for response in (first, cached, updated)] == [200, 200, 200]
+    assert first.json() == cached.json()
+    assert first.json() != updated.json()
+    assert seen == [instructions, "Focus on dates."]
+    assert client.post(url, data={"custom_instructions": "x" * 1201}, files=files).status_code == 422
+
+
+def test_instruction_defaults_are_per_owner_and_workflow(document_api, monkeypatch):
+    client, _ = document_api
+    app = client.app
+
+    def owner(request: Request) -> str:
+        return request.headers.get("X-Test-Owner", "owner")
+
+    monkeypatch.setitem(app.dependency_overrides, current_user, owner)
+    assert client.get("/api/instructions").json() == {"analysis": "", "compare": ""}
+    assert client.put("/api/instructions/analysis", json={"instructions": "  Reply in Hindi.  "}).status_code == 204
+    assert client.put("/api/instructions/compare", json={"instructions": "Focus on fees."}).status_code == 204
+    assert client.put("/api/instructions/compare", json={"instructions": "x" * 1201}).status_code == 422
+    app.state.portal = PortalService(app.state.settings)
+    restored = client.get("/api/instructions")
+    assert restored.headers["Cache-Control"] == "no-store"
+    assert restored.json() == {"analysis": "Reply in Hindi.", "compare": "Focus on fees."}
+    assert client.get("/api/instructions", headers={"X-Test-Owner": "other"}).json() == {"analysis": "", "compare": ""}
+    assert client.put("/api/instructions/analysis", json={"instructions": ""}).status_code == 204
+    assert client.get("/api/instructions").json() == {"analysis": "", "compare": "Focus on fees."}
+
+
 @pytest.mark.parametrize("workflow", ["analysis", "compare"])
 def test_result_review_is_owned_and_independent_of_cached_results(document_api, monkeypatch, workflow):
     client, analysis = document_api
@@ -105,13 +166,15 @@ def test_compare_aligns_shifted_pdf_pages_and_reports_additions_and_removals(doc
     assert changes[-1]["summary"].startswith("Page removed.")
 
 
-def test_long_analysis_splits_rejected_sections_and_merges_in_document_order(document_api, monkeypatch):
+@pytest.mark.parametrize("instructions", ["", "Prioritize figures."])
+def test_long_analysis_splits_rejected_sections_and_merges_in_document_order(document_api, monkeypatch, instructions):
     client, analysis = document_api
     oversize_payloads = []
     final_payloads = []
 
     def respond(prompt):
-        system, human = (message.content for message in prompt.to_messages())
+        system, *preferences, human = (message.content for message in prompt.to_messages())
+        assert preferences == ([f"User preferences for this request:\n{instructions}"] if instructions else [])
         if system.startswith("Summarize this part"):
             if len(human) > 9_000:
                 oversize_payloads.append(len(human))
@@ -126,7 +189,7 @@ def test_long_analysis_splits_rejected_sections_and_merges_in_document_order(doc
 
     monkeypatch.setattr(analysis, "analysis_model", lambda: RunnableLambda(respond))
     text = "A" * 16_000 + "B" * 16_000 + "C" * 4_000
-    response = client.post("/api/analyze", files={"file": ("report.txt", text, "text/plain")})
+    response = client.post("/api/analyze", data={"custom_instructions": instructions}, files={"file": ("report.txt", text, "text/plain")})
 
     assert response.status_code == 200, response.text
     assert response.json()["summary"] == "Combined summary"
@@ -147,12 +210,14 @@ def test_compare_short_text_documents_keeps_document_mode(document_api, monkeypa
     assert response.json()["changes"][0]["summary"] == "Text changed."
 
 
-def test_compare_long_text_documents_combines_both_section_summaries(document_api, monkeypatch):
+@pytest.mark.parametrize("instructions", ["", "Prioritize fees."])
+def test_compare_long_text_documents_combines_both_section_summaries(document_api, monkeypatch, instructions):
     client, analysis = document_api
     both_summaries_started = Barrier(2, timeout=5)
 
     def respond(prompt):
-        system, human = (message.content for message in prompt.to_messages())
+        system, *preferences, human = (message.content for message in prompt.to_messages())
+        assert preferences == ([f"User preferences for this request:\n{instructions}"] if instructions else [])
         if system.startswith("Summarize this part"):
             both_summaries_started.wait()
             return f"{human[0]} summary"
@@ -160,7 +225,7 @@ def test_compare_long_text_documents_combines_both_section_summaries(document_ap
         return json.dumps({"overview": "Updated terms.", "differences": ["Terms changed."], "similarities": []})
 
     monkeypatch.setattr(analysis, "analysis_model", lambda: RunnableLambda(respond))
-    response = client.post("/api/compare", files={
+    response = client.post("/api/compare", data={"custom_instructions": instructions}, files={
         "reference": ("old.txt", "A" * 8_000, "text/plain"),
         "actual": ("new.txt", "B" * 8_000, "text/plain"),
     })

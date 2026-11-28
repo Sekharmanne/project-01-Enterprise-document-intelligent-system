@@ -52,19 +52,19 @@ class DocumentAnalysisService:
         self.models = models
         self.segmented_analysis = self._build_segmented_analysis()
 
-    def analyze(self, document: ParsedDocument) -> DocumentAnalysis:
+    def analyze(self, document: ParsedDocument, custom_instructions: str = "") -> DocumentAnalysis:
         text = "\n\n".join(page.text for page in document.pages if page.text)
         model = self.analysis_model()
 
         parser = PromptManager.analysis_parser(DocumentAnalysis)
-        final_chain = PromptManager.document_analysis(DocumentAnalysis) | model | parser
+        final_chain = PromptManager.document_analysis(DocumentAnalysis, custom_instructions) | model | parser
         inputs = {
             "provider": self.settings.llm_provider,
             "filename": document.filename,
             "pages": len(document.pages),
         }
         try:
-            raw = self._analyze_text(text, final_chain, model, inputs)
+            raw = self._analyze_text(text, final_chain, model, inputs, custom_instructions)
         except APIStatusError as exc:
             if exc.status_code != 413:
                 raise
@@ -80,7 +80,7 @@ class DocumentAnalysisService:
         except ValidationError:
             raise OutputParserException("The analysis output did not match its schema.") from None
 
-    def _analyze_text(self, text, final_chain, model, inputs):
+    def _analyze_text(self, text, final_chain, model, inputs, custom_instructions):
         batch_size = ANALYSIS_BATCH_CHARS
         if len(text) <= batch_size:
             try:
@@ -96,7 +96,7 @@ class DocumentAnalysisService:
             "document_analysis_segmented", message="Summarizing the document in sections.",
             sections=len(sections),
         )
-        chain = PromptManager.summarize_analysis_section() | model | StrOutputParser()
+        chain = PromptManager.summarize_analysis_section(custom_instructions) | model | StrOutputParser()
         state = self.segmented_analysis.invoke(
             {"sections": sections, "section_chain": chain, "final_chain": final_chain, "inputs": inputs},
             config={"max_concurrency": DOCUMENT_WORKFLOW_CONCURRENCY},
@@ -147,8 +147,8 @@ class DocumentAnalysisService:
         model = self.models.model
         return model.bind(max_tokens=1024) if self.settings.llm_provider == "groq" else model
 
-    def comparison_sections(self, text: str, model, side: str) -> tuple[list[str], str]:
-        chain = PromptManager.summarize_analysis_section() | model | StrOutputParser()
+    def comparison_sections(self, text: str, model, side: str, custom_instructions: str = "") -> tuple[list[str], str]:
+        chain = PromptManager.summarize_analysis_section(custom_instructions) | model | StrOutputParser()
         sections = list(self._sections(text, 12_000))
         summaries = []
         for index, section in enumerate(sections, start=1):

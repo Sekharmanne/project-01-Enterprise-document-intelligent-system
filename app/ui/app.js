@@ -474,13 +474,65 @@ function renderComparison(result, referenceName, actualName) {
   output.replaceChildren(...children);
 }
 
+const instructionEditors = ['analysis', 'compare'].map(workflow => {
+  const id = `${workflow}-instructions`;
+  const editor = { workflow, id, input: $(id), edited: false };
+  editor.input.addEventListener('input', () => { editor.edited = true; });
+  $(`${id}-save`).addEventListener('click', async () => {
+    editor.edited = true;
+    const instructions = editor.input.value.trim();
+    const button = $(`${id}-save`);
+    button.disabled = true;
+    instructionStatus(editor, 'Saving default…');
+    try {
+      await request(`/api/instructions/${workflow}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instructions }),
+      });
+      instructionStatus(editor, instructions ? 'Default saved.' : 'Default cleared.');
+    } catch (error) {
+      instructionStatus(editor, `Could not save default: ${error.message}`, true);
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return editor;
+});
+
+function instructionStatus(editor, message, error = false) {
+  $(`${editor.id}-status`).dataset.error = String(error);
+  show(`${editor.id}-status`, message);
+}
+
+async function loadInstructionDefaults() {
+  try {
+    const defaults = await request('/api/instructions');
+    for (const editor of instructionEditors) {
+      const saved = defaults[editor.workflow];
+      if (!editor.edited && saved) {
+        editor.input.value = saved;
+        $(`${editor.id}-panel`).open = true;
+      }
+    }
+  } catch (error) {
+    for (const editor of instructionEditors) {
+      if (!editor.edited) instructionStatus(editor, `Could not load your saved default: ${error.message}`, true);
+    }
+  }
+}
+
+const instructionDefaultsReady = loadInstructionDefaults();
+
 $('analyze-btn').addEventListener('click', async () => {
   const file = $('analyze-file').files[0]; if (!file) return show('analyze-result', 'Choose a document.');
   processing('analyze-btn', true);
   show('analyze-result', 'Generating your summary. Large files can take several minutes.');
   try {
+    await instructionDefaultsReady;
     const body = new FormData();
     body.append('file', file);
+    body.append('custom_instructions', $('analysis-instructions').value.trim());
     const { data, headers } = await request('/api/analyze', { method: 'POST', body }, { includeHeaders: true });
     renderAnalysis(data, file.name);
     addResultReview($('analyze-result'), headers.get('X-Review-ID'));
@@ -494,9 +546,11 @@ $('compare-btn').addEventListener('click', async () => {
   processing('compare-btn', true);
   show('compare-result', 'Comparing documents. Large files can take several minutes.');
   try {
+    await instructionDefaultsReady;
     const body = new FormData();
     body.append('reference', a);
     body.append('actual', b);
+    body.append('custom_instructions', $('compare-instructions').value.trim());
     const { data, headers } = await request('/api/compare', { method: 'POST', body }, { includeHeaders: true });
     renderComparison(data, a.name, b.name);
     addResultReview($('compare-result'), headers.get('X-Review-ID'));

@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
-from app.ai_module.schemas import ResultReview, ReviewDecision, ReviewWorkflow
+from app.ai_module.schemas import DocumentWorkflow, ResultReview, ReviewDecision
 from app.security import SESSION_RE
 from app.services.session_storage import SessionStorage, utc_now
 
@@ -16,7 +16,7 @@ class ResultReviewStore:
         self.root = root
         self.lock = Lock()
 
-    def create(self, owner: str, workflow: ReviewWorkflow) -> str:
+    def create(self, owner: str, workflow: DocumentWorkflow) -> str:
         review = ResultReview(review_id=uuid4().hex, workflow=workflow, created_at=utc_now())
         self._save(review, owner)
         return review.review_id

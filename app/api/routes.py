@@ -8,14 +8,17 @@ from pathlib import Path
 from time import perf_counter
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, Response
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, Response
 from starlette.concurrency import run_in_threadpool
 from structlog import get_logger
 
 from app.config.config import Settings
 from app.utils.custom_logger import LOGGER_NAME
 from app.utils.langsmith_tracing import trace_operation
-from app.ai_module.schemas import AskRequest, ChatResponse, CompareResponse, DocumentAnalysis, ResultReview, ReviewDecision
+from app.ai_module.schemas import (
+    MAX_CUSTOM_INSTRUCTIONS, AskRequest, ChatResponse, CompareResponse, DocumentAnalysis, DocumentWorkflow,
+    InstructionDefaults, InstructionPreference, ResultReview, ReviewDecision,
+)
 from app.security import current_user, get_settings, require_session_id
 from app.ai_module.document_ingestion import parse_bytes, read_upload, read_upload_bytes
 from app.services.document_workflows import PortalService
@@ -57,6 +60,7 @@ def get_portal(request: Request) -> PortalService:
 User = Annotated[str, Depends(current_user)]
 Portal = Annotated[PortalService, Depends(get_portal)]
 Conf = Annotated[Settings, Depends(get_settings)]
+CustomInstructions = Annotated[str, Form(max_length=MAX_CUSTOM_INSTRUCTIONS)]
 
 
 @router.get("/health")
@@ -141,7 +145,9 @@ def general_chat_history(conversation_id: str, user: User, portal: Portal, respo
     return {"history": portal.general_chat_history(user, require_session_id(conversation_id))}
 
 
-def document_result_key(settings: Settings, user: str, version: int, *documents: tuple[str, bytes]) -> tuple:
+def document_result_key(
+    settings: Settings, user: str, version: int, *documents: tuple[str, bytes], custom_instructions: str = ""
+) -> tuple:
     models = {
         "google": (settings.google_chat_model,),
         "groq": (settings.groq_chat_model, *settings.groq_fallback_models),
@@ -151,12 +157,14 @@ def document_result_key(settings: Settings, user: str, version: int, *documents:
         user, version, settings.llm_provider, models[settings.llm_provider],
         settings.max_upload_mb, settings.max_pages, settings.max_extracted_chars,
         tuple((name, sha256(content).hexdigest()) for name, content in documents),
+        sha256(custom_instructions.encode("utf-8")).hexdigest(),
     )
 
 
 @router.post("/analyze", response_model=DocumentAnalysis)
 async def analyze(
-    file: UploadFile, user: User, portal: Portal, settings: Conf, response: Response
+    file: UploadFile, user: User, portal: Portal, settings: Conf, response: Response,
+    custom_instructions: CustomInstructions = "",
 ) -> DocumentAnalysis:
     analysis_settings = replace(
         settings,
@@ -164,14 +172,15 @@ async def analyze(
         max_pages=settings.max_analysis_pages,
         max_extracted_chars=settings.max_analysis_extracted_chars,
     )
+    instructions = custom_instructions.strip()
     with track_operation("document_analysis", "Document analysis"):
         name, content = await read_upload_bytes(file, analysis_settings)
 
         def analyze_document() -> DocumentAnalysis:
-            key = document_result_key(analysis_settings, user, 1, (name, content))
+            key = document_result_key(analysis_settings, user, 1, (name, content), custom_instructions=instructions)
             return portal.document_results.resolve(
                 "document_analysis", key, DocumentAnalysis,
-                lambda: portal.analyze(parse_bytes(name, content, analysis_settings)),
+                lambda: portal.analyze(parse_bytes(name, content, analysis_settings), instructions),
             )
 
         result = await run_in_threadpool(analyze_document)
@@ -182,8 +191,10 @@ async def analyze(
 
 @router.post("/compare", response_model=CompareResponse)
 async def compare(
-    reference: UploadFile, actual: UploadFile, user: User, portal: Portal, settings: Conf, response: Response
+    reference: UploadFile, actual: UploadFile, user: User, portal: Portal, settings: Conf, response: Response,
+    custom_instructions: CustomInstructions = "",
 ) -> CompareResponse:
+    instructions = custom_instructions.strip()
     with track_operation("document_compare", "Document comparison"):
         reference_name, reference_content = await read_upload_bytes(reference, settings)
         actual_name, actual_content = await read_upload_bytes(actual, settings)
@@ -193,12 +204,14 @@ async def compare(
                 settings, user, 1,
                 (Path(reference_name).suffix.lower(), reference_content),
                 (Path(actual_name).suffix.lower(), actual_content),
+                custom_instructions=instructions,
             )
             return portal.document_results.resolve(
                 "document_compare", key, CompareResponse,
                 lambda: portal.compare(
                     parse_bytes(reference_name, reference_content, settings),
                     parse_bytes(actual_name, actual_content, settings),
+                    instructions,
                 ),
             )
 
@@ -206,6 +219,20 @@ async def compare(
         response.headers["X-Review-ID"] = await run_in_threadpool(portal.result_reviews.create, user, "compare")
         response.headers["Cache-Control"] = "no-store"
         return result
+
+
+@router.get("/instructions", response_model=InstructionDefaults)
+def instruction_defaults(user: User, portal: Portal, response: Response) -> InstructionDefaults:
+    response.headers["Cache-Control"] = "no-store"
+    return portal.warehouse.instruction_defaults(user)
+
+
+@router.put("/instructions/{workflow}", status_code=204)
+def save_instruction_default(
+    workflow: DocumentWorkflow, preference: InstructionPreference, user: User, portal: Portal
+) -> Response:
+    portal.warehouse.save_instruction_default(user, workflow, preference.instructions)
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/reviews/{review_id}", response_model=ResultReview)

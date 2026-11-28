@@ -77,6 +77,10 @@ $env:LANGSMITH_TRACING_V2 = "false"
 .\env\Scripts\python.exe -m pytest -q tests
 ```
 
+## Custom instructions
+
+Open **Custom instructions** in Analysis & Summary or Compare to set the language, emphasis, or level of detail for that run. Choose **Save as my default** to prefill that workflow for your account. Clear the field and save it to reset the default. Changing the instructions creates a separate cache entry. Document evidence rules and response validation still apply.
+
 ## Human review
 
 Analysis and Compare results start as pending review. Choose **Approve** to accept a result or **Request changes** with a note explaining what needs revision. EDIS saves the review status and note for the user who generated the result. API clients can retrieve the decision using `GET /api/reviews/{review_id}` and the `X-Review-ID` header from the original result.
