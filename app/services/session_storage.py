@@ -10,6 +10,7 @@ import tempfile
 import threading
 import uuid
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -26,6 +27,11 @@ class SessionStorage:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
+        self.general_chat_lock = threading.RLock()
+
+    def general_history_path(self, owner: str) -> Path:
+        owner_key = sha256(owner.encode("utf-8")).hexdigest()
+        return self.root.parent / "general_chat" / f"{owner_key}.json"
 
     def path(self, sid: str) -> Path:
         require_session_id(sid)

@@ -155,23 +155,34 @@ def clean_filename(filename: str | None) -> str:
     return filename
 
 
-async def read_upload(upload: UploadFile, settings: Settings) -> ParsedDocument:
+async def read_upload_bytes(upload: UploadFile, settings: Settings) -> tuple[str, bytes]:
     name = clean_filename(upload.filename)
     max_bytes = settings.max_upload_mb * 1024 * 1024
     # Read at most max_bytes+1, rather than trusting Content-Length.
     raw = await upload.read(max_bytes + 1)
     if len(raw) > max_bytes:
         raise HTTPException(status_code=413, detail=f"File exceeds {settings.max_upload_mb} MB")
+    validate_file_type(name, raw)
+    return name, raw
+
+
+async def read_upload(upload: UploadFile, settings: Settings) -> ParsedDocument:
+    name, raw = await read_upload_bytes(upload, settings)
     return parse_bytes(name, raw, settings)
 
 
-def parse_bytes(filename: str, content: bytes, settings: Settings) -> ParsedDocument:
-    name = clean_filename(filename)
+def validate_file_type(name: str, content: bytes) -> str:
     extension = Path(name).suffix.lower()
     if extension not in SUPPORTED:
         raise HTTPException(status_code=415, detail="Supported extensions: .pdf, .docx, .txt")
     if not content:
         raise HTTPException(status_code=400, detail="Empty document")
+    return extension
+
+
+def parse_bytes(filename: str, content: bytes, settings: Settings) -> ParsedDocument:
+    name = clean_filename(filename)
+    extension = validate_file_type(name, content)
     if len(content) > settings.max_upload_mb * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File too large")
 

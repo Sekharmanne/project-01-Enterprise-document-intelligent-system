@@ -2,8 +2,8 @@ let activeSession = null;
 let token = ""; // Intentionally only in JS memory; not localStorage.
 let sessionKey = 'edis.activeSession';
 let accountEnabled = false;
-const conversationId = [...crypto.getRandomValues(new Uint8Array(16))]
-  .map(byte => byte.toString(16).padStart(2, '0')).join('');
+let conversationId = null;
+const conversationIdPattern = /^[a-f0-9]{32}$/;
 const runningOperations = new Map();
 const operationLabels = {
   'upload-btn': 'Uploading and indexing documents',
@@ -14,7 +14,7 @@ const operationLabels = {
 };
 const $ = id => document.getElementById(id);
 const headers = () => token ? { Authorization: `Bearer ${token}` } : {};
-async function request(url, options = {}) {
+async function request(url, options = {}, { includeHeaders = false } = {}) {
   const response = await fetch(url, { ...options, headers: { ...headers(), ...(options.headers || {}) } });
   if (response.status === 401 && accountEnabled) window.location.replace('/login');
   let data;
@@ -25,7 +25,7 @@ async function request(url, options = {}) {
     error.status = response.status;
     throw error;
   }
-  return data;
+  return includeHeaders ? { data, headers: response.headers } : data;
 }
 function show(id, value) { $(id).textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2); }
 function busy(id, state) { $(id).disabled = state; }
@@ -33,6 +33,7 @@ function processing(id, state, label = operationLabels[id]) {
   const button = $(id);
   button.setAttribute('aria-busy', String(state));
   busy(id, state);
+  if (id === 'ask-btn') busy('new-chat-btn', state);
   if (state) runningOperations.set(id, label);
   else runningOperations.delete(id);
 
@@ -104,6 +105,7 @@ $('dataset-btn').addEventListener('click', async () => {
 function setIndexBusy(state) {
   setSourceButtons(state);
   busy('ask-btn', state);
+  busy('new-chat-btn', state);
   if (state) chatStatus('Indexing documents…');
 }
 function setSourceButtons(state) {
@@ -118,19 +120,41 @@ function showIndexError(error) {
   show('session-status', `Error: ${error.message}`);
   chatStatus(`Could not index documents: ${error.message}`, true);
 }
-function activateSession(sessionId) {
-  const transcript = $('chat-history');
-  if (activeSession && activeSession !== sessionId) transcript.replaceChildren($('chat-intro'));
+function conversationKey() {
+  return `${sessionKey}.conversation.${activeSession ?? 'general'}`;
+}
+function savedConversationId() {
+  let id;
+  try { id = sessionStorage.getItem(conversationKey()); } catch {}
+  return conversationIdPattern.test(id) ? id : null;
+}
+function startConversation(id) {
+  conversationId = id ?? [...crypto.getRandomValues(new Uint8Array(16))]
+    .map(byte => byte.toString(16).padStart(2, '0')).join('');
+  try { sessionStorage.setItem(conversationKey(), conversationId); } catch {}
+}
+function activateSession(sessionId, history = []) {
+  const currentId = activeSession === sessionId ? conversationId : null;
   activeSession = sessionId;
   try { sessionStorage.setItem(sessionKey, sessionId); } catch {}
+  const latestId = history.findLast(turn => conversationIdPattern.test(turn.conversation_id))?.conversation_id;
+  startConversation(currentId ?? savedConversationId() ?? latestId);
   show('chat-intro', 'AI can make mistakes. Verify important information.');
-  $('chat-intro').hidden = Boolean(transcript.querySelector('.chat-message'));
-  scrollChatToBottom();
+  renderConversation(history.filter(turn => turn.conversation_id === conversationId));
   chatStatus('');
 }
 function showRestoredSession(session) {
-  activateSession(session.session_id);
+  activateSession(session.session_id, session.history);
   show('session-status', `Reused saved index for ${session.documents.length} documents.`);
+}
+async function restoreGeneralChat() {
+  const savedId = savedConversationId();
+  startConversation(savedId);
+  if (savedId) {
+    const { history } = await request(`/api/chat/history/${savedId}`);
+    renderConversation(history);
+  }
+  chatStatus('');
 }
 async function restoreSession() {
   processing('ask-btn', true, 'Checking for saved documents');
@@ -149,7 +173,7 @@ async function restoreSession() {
     }
     let sessionId;
     try { sessionId = sessionStorage.getItem(sessionKey); } catch {}
-    if (sessionId && /^[a-f0-9]{32}$/.test(sessionId)) {
+    if (sessionId && conversationIdPattern.test(sessionId)) {
       try {
         const session = await request(`/api/sessions/${sessionId}`);
         if (session.documents.length) {
@@ -163,10 +187,11 @@ async function restoreSession() {
     }
     const { session } = await request('/api/dataset/session');
     if (session) showRestoredSession(session);
-    else chatStatus('');
+    else await restoreGeneralChat();
   } catch (error) {
     chatStatus(`Could not restore your session: ${error.message}`, true);
   } finally {
+    if (!conversationId) startConversation(savedConversationId());
     processing('ask-btn', false);
     setSourceButtons(false);
   }
@@ -211,6 +236,26 @@ function scrollChatToBottom() {
   const transcript = $('chat-history');
   transcript.scrollTop = transcript.scrollHeight;
 }
+function renderConversation(history) {
+  const transcript = $('chat-history');
+  const intro = $('chat-intro');
+  transcript.replaceChildren(intro);
+  for (const turn of history) {
+    const bubble = chatMessage(turn.role);
+    fillChatMessage(bubble, turn.content, turn.sources);
+    transcript.append(bubble);
+  }
+  intro.hidden = history.length > 0;
+  scrollChatToBottom();
+}
+$('new-chat-btn').addEventListener('click', () => {
+  if ($('new-chat-btn').disabled) return;
+  startConversation();
+  renderConversation([]);
+  chatStatus('');
+  $('question').value = '';
+  $('question').focus();
+});
 async function askQuestion() {
   if ($('ask-btn').disabled) return;
   const input = $('question');
@@ -302,6 +347,57 @@ function resultList(title, items, ordered = false, collapsible = false) {
   return section;
 }
 
+function addResultReview(output, reviewId) {
+  const panel = resultNode('section', 'result-section review-panel');
+  const label = resultNode('label', null, 'Review note');
+  const note = resultNode('textarea');
+  note.rows = 2;
+  note.maxLength = 2000;
+  note.placeholder = 'Required when requesting changes';
+  label.append(note);
+
+  const approve = resultNode('button', 'button button-small button-primary', 'Approve');
+  const requestChanges = resultNode('button', 'button button-small button-secondary', 'Request changes');
+  approve.type = requestChanges.type = 'button';
+  const actions = resultNode('div', 'review-actions');
+  actions.append(approve, requestChanges);
+  const status = resultNode('p', 'review-status', 'Pending review');
+  status.setAttribute('role', 'status');
+
+  async function save(decision) {
+    const text = note.value.trim();
+    if (decision === 'changes_requested' && !text) {
+      status.dataset.error = 'true';
+      status.textContent = 'Describe the changes you want.';
+      note.focus();
+      return;
+    }
+
+    approve.disabled = requestChanges.disabled = note.disabled = true;
+    status.dataset.error = 'false';
+    status.textContent = 'Saving review…';
+    try {
+      const review = await request(`/api/reviews/${reviewId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: decision, note: text }),
+      });
+      note.value = review.note;
+      status.textContent = review.status === 'approved' ? 'Approved' : 'Changes requested';
+    } catch (error) {
+      status.dataset.error = 'true';
+      status.textContent = `Could not save review: ${error.message}`;
+    } finally {
+      approve.disabled = requestChanges.disabled = note.disabled = false;
+    }
+  }
+
+  approve.addEventListener('click', () => save('approved'));
+  requestChanges.addEventListener('click', () => save('changes_requested'));
+  panel.append(resultNode('h4', null, 'Review result'), label, actions, status);
+  output.append(panel);
+}
+
 function renderAnalysis(result, filename) {
   const title = resultNode('h3', 'result-title', result.title || filename);
   const summary = resultNode('section');
@@ -385,7 +481,9 @@ $('analyze-btn').addEventListener('click', async () => {
   try {
     const body = new FormData();
     body.append('file', file);
-    renderAnalysis(await request('/api/analyze', { method: 'POST', body }), file.name);
+    const { data, headers } = await request('/api/analyze', { method: 'POST', body }, { includeHeaders: true });
+    renderAnalysis(data, file.name);
+    addResultReview($('analyze-result'), headers.get('X-Review-ID'));
   }
   catch(e) { show('analyze-result', `Error: ${e.message}`); }
   finally { processing('analyze-btn', false); }
@@ -399,7 +497,9 @@ $('compare-btn').addEventListener('click', async () => {
     const body = new FormData();
     body.append('reference', a);
     body.append('actual', b);
-    renderComparison(await request('/api/compare', { method: 'POST', body }), a.name, b.name);
+    const { data, headers } = await request('/api/compare', { method: 'POST', body }, { includeHeaders: true });
+    renderComparison(data, a.name, b.name);
+    addResultReview($('compare-result'), headers.get('X-Review-ID'));
   }
   catch(e) { show('compare-result', `Error: ${e.message}`); }
   finally { processing('compare-btn', false); }

@@ -1,7 +1,7 @@
 """Document Portal public response contracts."""
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 
 class AskRequest(BaseModel):
@@ -57,3 +57,27 @@ class CompareResponse(BaseModel):
     overview: ComparisonOverview | None = None
     reference_sections: list[str] = Field(default_factory=list)
     actual_sections: list[str] = Field(default_factory=list)
+
+
+ReviewWorkflow = Literal["analysis", "compare"]
+ReviewStatus = Literal["approved", "changes_requested"]
+
+
+class ReviewDecision(BaseModel):
+    status: ReviewStatus
+    note: Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)] = ""
+
+    @model_validator(mode="after")
+    def require_change_note(self):
+        if self.status == "changes_requested" and not self.note:
+            raise ValueError("Describe the changes you want.")
+        return self
+
+
+class ResultReview(BaseModel):
+    review_id: str
+    workflow: ReviewWorkflow
+    status: ReviewStatus | Literal["pending"] = "pending"
+    note: str = ""
+    created_at: str
+    reviewed_at: str | None = None

@@ -128,8 +128,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=list(conf.cors_origins),
         allow_credentials=False,
-        allow_methods=["GET", "POST", "DELETE"],
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
+        expose_headers=["X-Review-ID"],
     )
     app.mount("/static", StaticFiles(directory=UI), name="static")
     app.include_router(router)

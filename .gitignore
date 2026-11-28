@@ -10,7 +10,8 @@ __pycache__/
 runtime_data/
 /logs/
 /output/
-/tests/
+/tests/*
+!/tests/test_*.py
 /data_downloading_script/downloads/
 .pytest_cache/
 .DS_Store

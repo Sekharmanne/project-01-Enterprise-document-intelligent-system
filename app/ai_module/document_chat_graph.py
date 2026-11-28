@@ -24,6 +24,7 @@ class ChatState(ChatInput):
     query: str
     hits: list[dict]
     answer: str
+    cited_hits: list[dict]
 
 
 def build_document_chat_graph(chat: DocumentChatService, index: IndexService):
@@ -60,7 +61,8 @@ def build_document_chat_graph(chat: DocumentChatService, index: IndexService):
             if state["hits"] else "No matching chunks were found. Returning the no-evidence reply."
         )
         logger.info("document_chat_answer", message=message)
-        return {"answer": chat.answer(state["question"], state["hits"], state["history"])}
+        reply, cited_hits = chat.answer(state["question"], state["hits"], state["history"])
+        return {"answer": reply, "cited_hits": cited_hits}
 
     workflow = StateGraph(ChatState, input_schema=ChatInput)
     workflow.add_node("rewrite_query", rewrite_query)
